@@ -1,125 +1,192 @@
 #include <pwd.h>
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/sysinfo.h>
 #include <sys/utsname.h>
+#include <proc/sysinfo.h>
 
-char* tux_ascii =
-        " ------------------------------\n"
-        "      \\\n"
-        "       \\\n"
-        "           .--.\n"
-        "          |o_o |\n"
-        "          |:_/ |\n"
-        "         //   \\ \\\n"
-        "        (|     | )\n"
-        "       /'\\_   _/`\\\n"
-        "       \\___)=(___/\n\n";
+const char *tux_ascii =
+	    " ------------------------------\n"
+	    "      \\\n"
+	    "       \\\n"
+	    "           .--.\n"
+	    "          |o_o |\n"
+	    "          |:_/ |\n"
+	    "         //   \\ \\\n"
+	    "        (|     | )\n"
+	    "       /'\\_   _/`\\\n"
+	    "       \\___)=(___/\n\n";
 
-char* get_kernel_release() {
-    FILE *fp = fopen("/proc/version", "r");
-    char* buffer = NULL;
-    size_t len;
-    ssize_t bytes_read = getdelim( &buffer, &len, '\0', fp);
+static char *
+get_kernel_release(void) {
+	struct utsname utsname;
 
-    char *kernel_release = strtok(buffer, " ");
-    for(int i=0;2>i;i++)
-        kernel_release = strtok(NULL, " ");
-    
-    return kernel_release;
+	if (uname(&utsname) == -1) {
+		fprintf(stderr, "tuxfetch: uname failed: %s\n", strerror(errno));
+		exit(EXIT_FAILURE);
+	}
+
+	return strdup(utsname.release);
 }
 
-char* get_shell() {
-    FILE *fp = fopen("/etc/passwd", "r");
-    char* buffer = NULL;
-    size_t len;
-    ssize_t bytes_read = getdelim( &buffer, &len, '\0', fp);
+static char *
+get_shell(void) {
+	uid_t uid;
+	struct passwd *pw;
 
-    uid_t uid = geteuid();
-    struct passwd *pw = getpwuid(uid);
-    char *username = pw->pw_name;
+	uid = geteuid();
+	pw = getpwuid(uid);
 
-    char *shell = strtok(buffer, "\n");
-    while(shell != NULL) {
-        if (strstr(shell, username) != NULL) break;
-        shell = strtok(NULL, "\n");
-    }
-
-    shell = strtok(shell, ":");
-    for(int i=0;5>i;i++)
-        shell = strtok(NULL, ":");
-
-    return shell;
+	return pw->pw_shell;
 }
 
-char* get_os_name() {
-    FILE *fp = fopen("/etc/os-release", "r");
+static char *
+get_os_name(void) {
+	struct utsname utsname;
+	FILE *fp;
+	char *line;
+	char *os_name, *machine, *os_name_and_machine;
+	size_t buff_size;
 
-    char* buffer = NULL;
-    size_t len;
-    ssize_t bytes_read = getdelim( &buffer, &len, '\0', fp);
+	if (uname(&utsname) == -1) {
+		fprintf(stderr, "tuxfetch: uname failed: %s\n", strerror(errno));
+		exit(EXIT_FAILURE);
+	}
 
-    char *os_name = strtok(buffer, "=\"");
-    for(int i=0;3>i;i++)
-        os_name = strtok(NULL, "=\"");
-    
-    os_name = strtok(os_name, "\n");
+	machine = utsname.machine;
 
-    struct utsname unameData;
-    uname(&unameData);
+	if (NULL == (fp = fopen("/etc/os-release", "r"))) {
+		fprintf(
+			stderr,
+			"tuxfetch: failed to open /etc/os-release: %s\n",
+			strerror(errno)
+		);
 
-    char *os_name_full = (char*)malloc(13 * sizeof(char));
-    sprintf(os_name_full, "%s %s", os_name, unameData.machine);
+		exit(EXIT_FAILURE);
+	}
 
-    return os_name_full;
+	os_name = line = NULL;
+	buff_size = 0;
+
+	while (getline(&line, &buff_size, fp) != -1) {
+		if (strncmp(line, "PRETTY_NAME=\"", sizeof("PRETTY_NAME=\"") - 1) == 0) {
+			char *start, *end;
+
+			/* search for the opening quote */
+			if (NULL == (start = strchr(line, '"'))) {
+				fputs("tuxfetch: invalid format /etc/os-release\n", stderr);
+				exit(EXIT_FAILURE);
+			}
+
+			/* skip quote char */
+			++start;
+
+			/* search for the closing quote */
+			if (NULL == (end = strchr(start, '"'))) {
+				fputs("tuxfetch: invalid format /etc/os-release\n", stderr);
+				exit(EXIT_FAILURE);
+			}
+
+			if (NULL == (os_name = malloc((end - start) + 1))) {
+				fputs("tuxfetch: malloc failed\n", stderr);
+				exit(EXIT_FAILURE);
+			}
+
+			memcpy(os_name, start, end - start);
+			os_name[end - start] = '\0';
+
+			break;
+		}
+	}
+
+	fclose(fp);
+	free(line);
+
+	if (NULL == os_name) {
+		fputs("tuxfetch: PRETTY_NAME key not found in /etc/os-release\n", stderr);
+		exit(EXIT_FAILURE);
+	}
+
+	os_name_and_machine = malloc(strlen(os_name) + strlen(machine) + 2);
+
+	if (NULL == os_name_and_machine) {
+		fputs("tuxfetch: malloc failed\n", stderr);
+		exit(EXIT_FAILURE);
+	}
+
+	sprintf(os_name_and_machine, "%s %s", os_name, machine);
+
+	free(os_name);
+
+	return os_name_and_machine;
 }
 
-char* get_uptime() {
-    struct sysinfo s_info;
-    sysinfo(&s_info);
+static char *
+get_uptime(void) {
+	struct sysinfo s_info;
+	long hours, minutes, seconds;
+	char *uptime;
 
-    long uptime_s = s_info.uptime;
-    
-    long minutesInSeconds = 60;
-    long hoursInSeconds = minutesInSeconds * 60;
-                          
-    long elapsedHours = uptime_s / hoursInSeconds;
-    uptime_s = uptime_s % hoursInSeconds;
+	if (sysinfo(&s_info) == -1) {
+		fprintf(stderr, "tuxfetch: sysinfo failed: %s\n", strerror(errno));
+		exit(EXIT_FAILURE);
+	}
 
-    long elapsedMinutes = uptime_s / minutesInSeconds;
-    uptime_s = uptime_s % minutesInSeconds;
+	hours = s_info.uptime / 3600;
+	minutes = (s_info.uptime - hours * 3600) / 60;
+	seconds = s_info.uptime - minutes * 60 - hours * 3600;
 
-    char *uptime = (char*)malloc(13 * sizeof(char));
-    sprintf(uptime, "%dh %dm %ds", elapsedHours, elapsedMinutes, uptime_s);
+	if (NULL == (uptime = malloc(32))) {
+		fputs("tuxfetch: malloc failed\n", stderr);
+		exit(EXIT_FAILURE);
+	}
 
-    return uptime;
+	sprintf(uptime, "%dh %dm %ds", hours, minutes, seconds);
+
+	return uptime;
 }
 
-char* get_ram_usage() {
-    struct sysinfo s_info;
-    sysinfo(&s_info);
+static char *
+get_ram_usage(void) {
+	long total_ram, used_ram;
+	char *ram_usage, *unit;
 
-    long total_RAM = s_info.totalram / 1024 / 1024;
-    long used_RAM = total_RAM - s_info.freeram / 1024 / 1024;
+	meminfo();
 
-    char *ram_usage = (char*)malloc(13 * sizeof(char));
-    sprintf(ram_usage, "%dM / %dM", used_RAM, total_RAM);
+#ifdef MEMORY_UNIT_MIB
+	unit = "MiB";
+	total_ram = (kb_main_total * 1024) / (1000 * 1000);
+	used_ram = (kb_main_used * 1024) / (1000 * 1000);
+#else
+	unit = "MB";
+	total_ram = kb_main_total / 1024;
+	used_ram = kb_main_used / 1024;
+#endif
 
-    return ram_usage;
+	if (NULL == (ram_usage = malloc(32))) {
+		fputs("tuxfetch: malloc failed\n", stderr);
+		exit(EXIT_FAILURE);
+	}
+
+	sprintf(ram_usage, "%d / %d %s", used_ram, total_ram, unit);
+
+	return ram_usage;
 }
 
-int main() {
-    printf("\n ------------------------------\n");
+int
+main(void) {
+	printf("\n ------------------------------\n");
 
-    printf("     \x1B[35mos\x1B[0m %s \n", get_os_name());
-    printf("     \x1B[35mkernel\x1B[0m %s \n", get_kernel_release());
-    printf("     \x1B[35muptime\x1B[0m %s \n", get_uptime());
-    printf("     \x1B[35mshell\x1B[0m %s \n", get_shell());
-    printf("     \x1B[35mmemory\x1B[0m %s \n", get_ram_usage());
+	printf("     \x1B[35mos\x1B[0m %s \n", get_os_name());
+	printf("     \x1B[35mkernel\x1B[0m %s \n", get_kernel_release());
+	printf("     \x1B[35muptime\x1B[0m %s \n", get_uptime());
+	printf("     \x1B[35mshell\x1B[0m %s \n", get_shell());
+	printf("     \x1B[35mmemory\x1B[0m %s \n", get_ram_usage());
 
-    printf(tux_ascii);
+	puts(tux_ascii);
 
-    return 0;
+	return EXIT_SUCCESS;
 }
